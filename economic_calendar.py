@@ -25,9 +25,32 @@ import urllib.error
 from tkinter import messagebox
 
 APP_NAME    = "Economic Calendar"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_ID      = "economiccalendar"   # id used in the shared announcement feed
 REPO_URL    = "https://github.com/zekibilenay/economic-calendar"
+
+# ─── Platform ────────────────────────────────────────────────
+IS_WIN   = sys.platform.startswith("win")
+IS_MAC   = sys.platform == "darwin"
+IS_LINUX = not (IS_WIN or IS_MAC)
+
+# Windows keeps its original fonts. macOS / Linux get fonts that exist there.
+if IS_WIN:
+    UI_FONT, MONO_FONT = "Segoe UI", "Consolas"
+elif IS_MAC:
+    UI_FONT, MONO_FONT = "Helvetica Neue", "Menlo"
+else:
+    UI_FONT, MONO_FONT = "DejaVu Sans", "DejaVu Sans Mono"
+
+def fsz(points):
+    """macOS draws Tk fonts at 72 dpi (Windows: 96), so sizes are bumped there."""
+    return points + 3 if IS_MAC else points
+
+# Colour emoji can crash Tk on some Linux setups, so Linux uses plain symbols.
+if IS_LINUX:
+    G = dict(cal="▦", globe="⊕", theme="◐", pin="⚑", notes="✎", clock="◷", party="", new_app="✦")
+else:
+    G = dict(cal="📅", globe="🌐", theme="🌗", pin="📌", notes="📝", clock="🕐", party="🎉", new_app="✨")
 
 # Shared announcement feed (same JSON file all apps read). HTTPS only.
 ANNOUNCE_URL = os.environ.get("ECONCAL_ANNOUNCE_URL",
@@ -257,7 +280,7 @@ def parse_events(raw_events, tz=None):
 # English-only app: announcement text always uses the "en" entry of the feed.
 # Announcements cannot be dismissed; with several, they rotate automatically.
 ANN_LANG      = "en"
-ANN_TYPE_ICON = {"update": "⬆", "new_app": "✨", "recommended": "★", "info": "ℹ"}
+ANN_TYPE_ICON = {"update": "⬆", "new_app": G["new_app"], "recommended": "★", "info": "ℹ"}
 
 def parse_version(v):
     parts = re.findall(r"\d+", str(v))
@@ -338,6 +361,96 @@ def resource_path(name):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, name)
 
+def fit_text(font, text, px):
+    """Shortens text with a trailing … so it fits in px pixels."""
+    if px <= 10 or font.measure(text) <= px:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if font.measure(text[:mid].rstrip() + "…") <= px:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + "…"
+
+# ─── macOS widgets ───────────────────────────────────────────
+# On macOS, tk.Button / tk.Checkbutton are drawn natively and ignore the
+# app's colours, which would make the dark theme unreadable. There they are
+# replaced by Label-based look-alikes. Windows / Linux keep the normal widgets.
+class FlatButton(tk.Label):
+    def __init__(self, parent, command=None, activebackground=None,
+                 activeforeground=None, **kw):
+        for k in ("relief", "bd", "highlightthickness"):
+            kw.pop(k, None)
+        kw.setdefault("padx", 8)
+        self._cmd, self._abg, self._afg = command, activebackground, activeforeground
+        self._normal = None
+        super().__init__(parent, bd=0, relief="flat", **kw)
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.bind("<ButtonRelease-1>", self._release)
+
+    def configure(self, cnf=None, **kw):
+        if "command" in kw:
+            self._cmd = kw.pop("command")
+        if "activebackground" in kw:
+            self._abg = kw.pop("activebackground")
+        if "activeforeground" in kw:
+            self._afg = kw.pop("activeforeground")
+        if cnf or kw:
+            return super().configure(cnf, **kw)
+    config = configure
+
+    def _enter(self, _e):
+        self._normal = (str(self.cget("bg")), str(self.cget("fg")))
+        if self._abg:
+            super().configure(bg=self._abg)
+        if self._afg:
+            super().configure(fg=self._afg)
+
+    def _leave(self, _e):
+        if self._normal:
+            super().configure(bg=self._normal[0], fg=self._normal[1])
+            self._normal = None
+
+    def _release(self, e):
+        if self._cmd and 0 <= e.x < self.winfo_width() and 0 <= e.y < self.winfo_height():
+            self._cmd()
+
+
+class FlatCheck(tk.Label):
+    def __init__(self, parent, text="", variable=None, command=None, selectcolor=None,
+                 activebackground=None, activeforeground=None, **kw):
+        for k in ("relief", "bd", "highlightthickness"):
+            kw.pop(k, None)
+        self._label, self._var, self._cmd = text, variable, command
+        super().__init__(parent, bd=0, relief="flat", **kw)
+        self._trace = self._var.trace_add("write", lambda *a: self._sync())
+        self.bind("<Button-1>", self._toggle)
+        self.bind("<Destroy>", self._cleanup)
+        self._sync()
+
+    def _sync(self):
+        try:
+            super().configure(text=("☑ " if self._var.get() else "☐ ") + self._label)
+        except tk.TclError:
+            pass
+
+    def _toggle(self, _e):
+        self._var.set(not self._var.get())
+        if self._cmd:
+            self._cmd()
+
+    def _cleanup(self, _e):
+        try:
+            self._var.trace_remove("write", self._trace)
+        except Exception:
+            pass
+
+Button      = FlatButton if IS_MAC else tk.Button
+Checkbutton = FlatCheck  if IS_MAC else tk.Checkbutton
+
 # ─── Scrollable frame ────────────────────────────────────────
 class ScrollFrame(tk.Frame):
     """Vertical content area, scrollable with the mouse wheel."""
@@ -369,7 +482,10 @@ class ScrollFrame(tk.Frame):
         self.canvas.unbind_all("<Button-5>")
 
     def _on_wheel(self, event):
-        self.canvas.yview_scroll(int(-event.delta / 120), "units")
+        if IS_MAC:   # macOS reports small deltas (1, 2, 3…), not multiples of 120
+            self.canvas.yview_scroll(-int(event.delta), "units")
+        else:
+            self.canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def _on_wheel_lin(self, event):
         self.canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
@@ -390,12 +506,12 @@ class EconCalApp:
         self.root.geometry("1060x620")
         self.root.minsize(820, 460)
 
-        self.f_mono  = tkfont.Font(family="Consolas", size=10)
-        self.f_ui    = tkfont.Font(family="Segoe UI",  size=9)
-        self.f_ui_b  = tkfont.Font(family="Segoe UI",  size=9, weight="bold")
-        self.f_ui_i  = tkfont.Font(family="Segoe UI",  size=9, slant="italic")
-        self.f_ui_bi = tkfont.Font(family="Segoe UI",  size=9, weight="bold", slant="italic")
-        self.f_title = tkfont.Font(family="Segoe UI",  size=11, weight="bold")
+        self.f_mono  = tkfont.Font(family=MONO_FONT, size=fsz(10))
+        self.f_ui    = tkfont.Font(family=UI_FONT,  size=fsz(9))
+        self.f_ui_b  = tkfont.Font(family=UI_FONT,  size=fsz(9), weight="bold")
+        self.f_ui_i  = tkfont.Font(family=UI_FONT,  size=fsz(9), slant="italic")
+        self.f_ui_bi = tkfont.Font(family=UI_FONT,  size=fsz(9), weight="bold", slant="italic")
+        self.f_title = tkfont.Font(family=UI_FONT,  size=fsz(11), weight="bold")
 
         settings = load_settings()
 
@@ -451,8 +567,6 @@ class EconCalApp:
     # ── Overall layout ──────────────────────────────────────
     def _build_layout(self):
         self._build_header()
-        self.ann_holder = tk.Frame(self.root, bg=BG)
-        self.ann_holder.pack(fill="x")
         self._build_filterbar()
 
         # A draggable divider between the calendar (left) and notes (right)
@@ -486,14 +600,14 @@ class EconCalApp:
     def _build_header(self):
         bar = tk.Frame(self.root, bg=HDR_BG)
         bar.pack(fill="x")
-        tk.Label(bar, text="  📅  ECONOMIC CALENDAR", bg=HDR_BG, fg=TXT,
+        tk.Label(bar, text=f"  {G['cal']}  ECONOMIC CALENDAR", bg=HDR_BG, fg=TXT,
                  font=self.f_title, anchor="w").pack(side="left", pady=7, padx=4)
         self.clock_lbl = tk.Label(bar, text="", bg=HDR_BG, fg=BLUE, font=self.f_ui)
         self.clock_lbl.pack(side="right", padx=10)
 
         tzf = tk.Frame(bar, bg=HDR_BG)
         tzf.pack(side="right", padx=4)
-        tk.Label(tzf, text="🌐", bg=HDR_BG, fg=TXT_DIM, font=self.f_ui).pack(side="left")
+        tk.Label(tzf, text=G["globe"], bg=HDR_BG, fg=TXT_DIM, font=self.f_ui).pack(side="left")
         self.tz_menu = tk.OptionMenu(tzf, self.tz_var, *[lbl for lbl, _ in TIMEZONES],
                                       command=self._on_timezone_change)
         self.tz_menu.configure(bg=HDR_BG, fg=TXT, relief="flat", bd=0,
@@ -503,14 +617,14 @@ class EconCalApp:
                                         activebackground=ACCENT, activeforeground=ON_ACCENT)
         self.tz_menu.pack(side="left")
 
-        tk.Button(bar, text="↻", bg=HDR_BG, fg=TXT_DIM, relief="flat", bd=0,
+        Button(bar, text="↻", bg=HDR_BG, fg=TXT_DIM, relief="flat", bd=0,
                   font=self.f_title, cursor="hand2", activebackground=HDR_BG, activeforeground=TXT,
                   command=lambda: self._refresh(force=True)).pack(side="right", padx=4)
-        self.btn_theme = tk.Button(bar, text="🌗", bg=HDR_BG, fg=TXT_DIM, relief="flat", bd=0,
+        self.btn_theme = Button(bar, text=G["theme"], bg=HDR_BG, fg=TXT_DIM, relief="flat", bd=0,
                   font=self.f_title, cursor="hand2", activebackground=HDR_BG, activeforeground=TXT,
                   command=self._toggle_theme)
         self.btn_theme.pack(side="right", padx=4)
-        self.btn_pin = tk.Button(bar, text="📌", relief="flat", bd=0,
+        self.btn_pin = Button(bar, text=G["pin"], relief="flat", bd=0,
                   font=self.f_title, cursor="hand2",
                   command=self._toggle_pin)
         self.btn_pin.pack(side="right", padx=4)
@@ -518,15 +632,19 @@ class EconCalApp:
 
         tabs = tk.Frame(self.root, bg=HDR_BG)
         tabs.pack(fill="x")
-        self.btn_today = tk.Button(tabs, text="  Today  ", relief="flat", bd=0,
+        self.btn_today = Button(tabs, text="  Today  ", relief="flat", bd=0,
                                     font=self.f_ui_b, cursor="hand2",
                                     command=lambda: self._set_tab("today"))
-        self.btn_week  = tk.Button(tabs, text="  Full Week  ", relief="flat", bd=0,
+        self.btn_week  = Button(tabs, text="  Full Week  ", relief="flat", bd=0,
                                     font=self.f_ui_b, cursor="hand2",
                                     command=lambda: self._set_tab("week"))
         self.btn_today.pack(side="left", padx=(8, 2), pady=(0, 6))
         self.btn_week.pack(side="left", padx=2, pady=(0, 6))
         self._style_tabs()
+
+        # Announcement box lives in this row, to the right of the tabs.
+        self.ann_holder = tk.Frame(tabs, bg=HDR_BG)
+        self.ann_holder.pack(side="left", fill="x", expand=True, padx=(12, 12), pady=(0, 6))
 
         tk.Frame(self.root, bg=SEP, height=1).pack(fill="x")
 
@@ -618,13 +736,13 @@ class EconCalApp:
         impf = tk.Frame(bar, bg=BAR_BG)
         impf.pack(side="left", padx=8, pady=4)
         tk.Label(impf, text="Impact:", bg=BAR_BG, fg=TXT_DIM, font=self.f_ui).pack(side="left", padx=(0, 4))
-        tk.Checkbutton(impf, text="High", variable=self.show_high, command=self._on_filter_change,
+        Checkbutton(impf, text="High", variable=self.show_high, command=self._on_filter_change,
                         bg=BAR_BG, fg=RED, selectcolor=BAR_BG, activebackground=BAR_BG, activeforeground=RED,
                         font=self.f_ui, cursor="hand2").pack(side="left")
-        tk.Checkbutton(impf, text="Medium", variable=self.show_medium, command=self._on_filter_change,
+        Checkbutton(impf, text="Medium", variable=self.show_medium, command=self._on_filter_change,
                         bg=BAR_BG, fg=YELLOW, selectcolor=BAR_BG, activebackground=BAR_BG, activeforeground=YELLOW,
                         font=self.f_ui, cursor="hand2").pack(side="left")
-        tk.Checkbutton(impf, text="Low", variable=self.show_low, command=self._on_filter_change,
+        Checkbutton(impf, text="Low", variable=self.show_low, command=self._on_filter_change,
                         bg=BAR_BG, fg=TXT_DIM, selectcolor=BAR_BG, activebackground=BAR_BG, activeforeground=TXT_DIM,
                         font=self.f_ui, cursor="hand2").pack(side="left")
 
@@ -637,11 +755,11 @@ class EconCalApp:
         # Kept right next to the label (not at the far right of the window)
         # so they're always visible no matter how many currencies the
         # checkbox list expands to.
-        tk.Button(self.country_bar, text="Select All", font=self.f_ui, relief="flat",
+        Button(self.country_bar, text="Select All", font=self.f_ui, relief="flat",
                   bg=HDR_BG, fg=TXT_DIM, cursor="hand2",
                   activebackground=BAR_BG, activeforeground=TXT,
                   command=self._select_all_countries).pack(side="left", padx=2)
-        tk.Button(self.country_bar, text="Clear All", font=self.f_ui, relief="flat",
+        Button(self.country_bar, text="Clear All", font=self.f_ui, relief="flat",
                   bg=HDR_BG, fg=TXT_DIM, cursor="hand2",
                   activebackground=BAR_BG, activeforeground=TXT,
                   command=self._select_no_countries).pack(side="left", padx=(2, 8))
@@ -666,17 +784,17 @@ class EconCalApp:
     def _build_notes(self, parent):
         head = tk.Frame(parent, bg=HDR_BG)
         head.pack(fill="x")
-        tk.Label(head, text="  📝 NOTES", bg=HDR_BG, fg=TXT, font=self.f_title,
+        tk.Label(head, text=f"  {G['notes']} NOTES", bg=HDR_BG, fg=TXT, font=self.f_title,
                  anchor="w").pack(side="left", pady=6)
         self.notes_status = tk.Label(head, text="", bg=HDR_BG, fg=GREEN, font=self.f_ui)
         self.notes_status.pack(side="right", padx=6)
         # Bold / italic toggle buttons for the selected notes text
         # (also reachable via Ctrl+B / Ctrl+I).
-        self.btn_italic = tk.Button(head, text="I", font=self.f_ui_i, width=2, relief="flat",
+        self.btn_italic = Button(head, text="I", font=self.f_ui_i, width=2, relief="flat",
                                      bg=HDR_BG, fg=TXT, activebackground=BAR_BG, activeforeground=TXT, cursor="hand2",
                                      command=lambda: self._notes_toggle_style("italic"))
         self.btn_italic.pack(side="right", padx=(0, 2))
-        self.btn_bold = tk.Button(head, text="B", font=self.f_ui_b, width=2, relief="flat",
+        self.btn_bold = Button(head, text="B", font=self.f_ui_b, width=2, relief="flat",
                                    bg=HDR_BG, fg=TXT, activebackground=BAR_BG, activeforeground=TXT, cursor="hand2",
                                    command=lambda: self._notes_toggle_style("bold"))
         self.btn_bold.pack(side="right", padx=(6, 2))
@@ -831,7 +949,7 @@ class EconCalApp:
         self._render_announcement()
 
     def _render_announcement(self):
-        """Draws (or hides) the slim announcement strip under the header."""
+        """Draws (or hides) the announcement box in the tabs row."""
         if self._ann_rotate_job:
             try:
                 self.root.after_cancel(self._ann_rotate_job)
@@ -845,26 +963,31 @@ class EconCalApp:
         self._ann_idx %= len(self._ann_items)
         item = self._ann_items[self._ann_idx]
 
-        strip = tk.Frame(self.ann_holder, bg=BAR_BG)
-        strip.pack(fill="x")
-        tk.Frame(strip, bg=ACCENT, width=4).pack(side="left", fill="y")
+        box = tk.Frame(self.ann_holder, bg=SEP)            # 1 px outline
+        box.pack(fill="x")
+        inner = tk.Frame(box, bg=BAR_BG)
+        inner.pack(fill="x", padx=1, pady=1)
+        tk.Frame(inner, bg=ACCENT, width=4).pack(side="left", fill="y")
 
-        tk.Label(strip, text=ANN_TYPE_ICON.get(item["type"], "ℹ"), bg=BAR_BG, fg=ACCENT,
-                 font=self.f_ui_b).pack(side="left", padx=(10, 6), pady=6)
+        icon = tk.Label(inner, text=ANN_TYPE_ICON.get(item["type"], "ℹ"), bg=BAR_BG, fg=ACCENT,
+                        font=self.f_ui_b)
+        icon.pack(side="left", padx=(10, 6), pady=4)
 
         if len(self._ann_items) > 1:
-            tk.Label(strip, text=f"{self._ann_idx + 1}/{len(self._ann_items)}", bg=BAR_BG,
-                     fg=TXT_DIM, font=self.f_ui).pack(side="right", padx=(4, 12))
+            tk.Label(inner, text=f"{self._ann_idx + 1}/{len(self._ann_items)}", bg=BAR_BG,
+                     fg=TXT_DIM, font=self.f_ui).pack(side="right", padx=(6, 10))
 
-        txt = tk.Label(strip, text=item["text"], bg=BAR_BG, fg=TXT, font=self.f_ui,
-                       anchor="w", justify="left")
-        txt.pack(side="left", fill="x", expand=True, pady=6)
-        strip.bind("<Configure>", lambda e: txt.configure(wraplength=max(200, e.width - 110)))
+        # One line only: text is shortened with … to the space available.
+        txt = tk.Label(inner, text="", width=1, bg=BAR_BG, fg=TXT, font=self.f_ui, anchor="w")
+        txt.pack(side="left", fill="x", expand=True, pady=4)
+        full = item["text"]
+        txt.bind("<Configure>", lambda e: txt.configure(
+            text=fit_text(self.f_ui, full, max(0, txt.winfo_width() - 6))))
         if item["url"]:
-            txt.configure(cursor="hand2", fg=ACCENT)
-            txt.bind("<Button-1>", lambda e, u=item["url"]: self._open_announcement_url(u))
-
-        tk.Frame(self.ann_holder, bg=SEP, height=1).pack(fill="x")
+            for w in (txt, icon):
+                w.configure(cursor="hand2")
+                w.bind("<Button-1>", lambda e, u=item["url"]: self._open_announcement_url(u))
+            txt.configure(fg=ACCENT)
 
         if len(self._ann_items) > 1:
             self._ann_rotate_job = self.root.after(ANNOUNCE_ROTATE_MS, self._rotate_announcement)
@@ -882,7 +1005,7 @@ class EconCalApp:
     # ── Clock ─────────────────────────────────────────────────
     def _tick(self):
         now = self._now()
-        self.clock_lbl.config(text=f"🕐  {now.strftime('%H:%M')}  ")
+        self.clock_lbl.config(text=f"{G['clock']}  {now.strftime('%H:%M')}  ")
         self.root.after(20_000, self._tick)
 
     # ── Persist settings ─────────────────────────────────────
@@ -935,7 +1058,7 @@ class EconCalApp:
         for w in self.country_chk_area.winfo_children():
             w.destroy()
         for c in currencies:
-            tk.Checkbutton(self.country_chk_area, text=CURRENCY_DISPLAY.get(c, c),
+            Checkbutton(self.country_chk_area, text=CURRENCY_DISPLAY.get(c, c),
                             variable=self.country_vars[c],
                             command=self._on_filter_change, bg=BAR_BG, fg=TXT,
                             selectcolor=BAR_BG, activebackground=BAR_BG, activeforeground=TXT,
@@ -1008,7 +1131,7 @@ class EconCalApp:
                  pady=12).pack()
         tk.Label(self.scroll.inner, text=msg, bg=BG, fg=TXT_DIM, font=self.f_ui,
                  pady=4, wraplength=520, justify="left").pack(padx=12)
-        tk.Button(self.scroll.inner, text="  Retry  ", bg=HDR_BG, fg=TXT, relief="flat",
+        Button(self.scroll.inner, text="  Retry  ", bg=HDR_BG, fg=TXT, relief="flat",
                   font=self.f_ui, cursor="hand2", pady=4,
                   activebackground=BAR_BG, activeforeground=TXT,
                   command=lambda: self._refresh(force=True)).pack(pady=12)
@@ -1039,13 +1162,13 @@ class EconCalApp:
         if self.tab.get() == "today":
             todays = [e for e in events if e["date"] == today]
             if not todays:
-                tk.Label(self.scroll.inner, text="No news today for the selected filters  🎉",
+                tk.Label(self.scroll.inner, text=f"No news today for the selected filters  {G['party']}".rstrip(),
                          bg=BG, fg=TXT_DIM, font=self.f_ui, pady=24).pack()
             else:
                 self._render_rows(todays, today)
         else:
             if not events:
-                tk.Label(self.scroll.inner, text="No news this week for the selected filters  🎉",
+                tk.Label(self.scroll.inner, text=f"No news this week for the selected filters  {G['party']}".rstrip(),
                          bg=BG, fg=TXT_DIM, font=self.f_ui, pady=24).pack()
             else:
                 for day, day_events in groupby(events, key=lambda e: e["date"]):
@@ -1130,7 +1253,12 @@ class EconCalApp:
 if __name__ == "__main__":
     root = tk.Tk()
     try:
-        root.iconbitmap(resource_path("economic_calendar.ico"))
+        if IS_WIN:
+            root.iconbitmap(resource_path("economic_calendar.ico"))
+        else:   # macOS / Linux: .ico is not supported, use the PNG
+            _icon = tk.PhotoImage(file=resource_path("economic_calendar.png"))
+            root.iconphoto(True, _icon)
+            root._icon_ref = _icon
     except Exception:
         pass
     app = EconCalApp(root)
