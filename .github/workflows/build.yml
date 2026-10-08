@@ -1,1 +1,56 @@
+name: Build Windows exe
 
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # create the release
+  id-token: write        # build provenance (attestation)
+  attestations: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: pip install "pyinstaller==6.*"
+
+      - name: Build exe
+        run: >
+          pyinstaller --onedir --windowed --noconfirm
+          --name EconomicCalendar
+          --icon economic_calendar.ico
+          --add-data "economic_calendar.ico;."
+          economic_calendar.py
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/EconomicCalendar -DestinationPath EconomicCalendar-windows.zip
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash EconomicCalendar-windows.zip -Algorithm SHA256).Hash.ToLower()
+          "$h  EconomicCalendar-windows.zip" | Out-File -Encoding ascii EconomicCalendar-windows.zip.sha256
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: EconomicCalendar-windows.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            EconomicCalendar-windows.zip
+            EconomicCalendar-windows.zip.sha256
+          generate_release_notes: true
