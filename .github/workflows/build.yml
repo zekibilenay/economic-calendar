@@ -1,4 +1,4 @@
-name: Build Windows exe
+name: Build apps (Windows, macOS, Linux)
 
 on:
   push:
@@ -12,7 +12,32 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false   # one platform failing must not stop the others
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+            sep: ";"
+            icon: economic_calendar.ico
+            archive: EconomicCalendar-windows.zip
+          - name: macos-arm64
+            os: macos-latest          # Apple Silicon
+            sep: ":"
+            icon: economic_calendar.icns
+            archive: EconomicCalendar-macos-arm64.zip
+          - name: macos-intel
+            os: macos-15-intel        # Intel Macs
+            sep: ":"
+            icon: economic_calendar.icns
+            archive: EconomicCalendar-macos-intel.zip
+          - name: linux
+            os: ubuntu-22.04          # older glibc = runs on more distros
+            sep: ":"
+            icon: economic_calendar.png
+            archive: EconomicCalendar-linux.tar.gz
+
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -20,37 +45,64 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check that tkinter is available
+        run: python -c "import tkinter; print('Tk', tkinter.TkVersion)"
+
       - name: Install PyInstaller
         run: pip install "pyinstaller==6.*"
 
-      - name: Build exe
+      - name: Build
+        shell: bash
         run: >
           pyinstaller --onedir --windowed --noconfirm
           --name EconomicCalendar
-          --icon economic_calendar.ico
-          --add-data "economic_calendar.ico;."
+          --icon "${{ matrix.icon }}"
+          --add-data "economic_calendar.ico${{ matrix.sep }}."
+          --add-data "economic_calendar.png${{ matrix.sep }}."
           economic_calendar.py
 
-      - name: Zip
-        shell: pwsh
-        run: Compress-Archive -Path dist/EconomicCalendar -DestinationPath EconomicCalendar-windows.zip
+      - name: Package
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Windows) powershell -NoProfile -Command "Compress-Archive -Path dist/EconomicCalendar -DestinationPath '${{ matrix.archive }}'" ;;
+            macOS)   (cd dist && ditto -c -k --keepParent EconomicCalendar.app "../${{ matrix.archive }}") ;;
+            Linux)   tar -czf "${{ matrix.archive }}" -C dist EconomicCalendar ;;
+          esac
 
       - name: Checksum
-        shell: pwsh
+        shell: bash
         run: |
-          $h = (Get-FileHash EconomicCalendar-windows.zip -Algorithm SHA256).Hash.ToLower()
-          "$h  EconomicCalendar-windows.zip" | Out-File -Encoding ascii EconomicCalendar-windows.zip.sha256
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+          fi
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: EconomicCalendar-windows.zip
+          subject-path: ${{ matrix.archive }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            EconomicCalendar-windows.zip
-            EconomicCalendar-windows.zip.sha256
+          files: release-files/*
           generate_release_notes: true
